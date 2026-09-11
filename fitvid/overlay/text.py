@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from fitvid.models import Activity, TextOverlayElement
 from fitvid.overlay.composite import resolve_position
+from fitvid.units import convert_si_value
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -43,16 +44,7 @@ class TextOverlayRenderer:
         if raw is None:
             value_str = "--"
         else:
-            value = raw
-            # Light unit conversion for common fields (FIT stores SI)
-            if element.field == "speed":
-                if element.unit_system == "imperial":
-                    value = float(raw) * 2.236936  # m/s → mph
-                else:
-                    value = float(raw) * 3.6  # m/s → km/h
-            elif element.field in ("altitude", "distance"):
-                if element.unit_system == "imperial":
-                    value = float(raw) * 3.28084  # m → ft
+            value = convert_si_value(element.field, float(raw), element.unit_system)
             try:
                 value_str = element.format.format(value=value)
             except Exception:

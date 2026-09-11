@@ -1,11 +1,13 @@
 # Example overlay config for fitvid compile --overlay
+# Default measurement system is FPS (US customary: mph, ft, °F).
+# Use unit_system: metric for km/h, m, °C. Alias: imperial == fps.
 overlay:
+  unit_system: fps
   text:
     - field: speed
-      format: "{value:.1f} km/h"
+      format: "{value:.1f} mph"
       anchor: bottom-left
-      # note: speed in FIT is typically m/s — adjust format/unit_system as needed
-      unit_system: metric
+      unit_system: fps
     - field: heart_rate
       label: "HR"
       format: "{value:.0f} bpm"

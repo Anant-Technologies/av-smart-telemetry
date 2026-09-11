@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     @Published var inspect: InspectPayload?
     @Published var selectedFieldNames: Set<String> = []
     @Published var includeMap = false
+    /// Overlay measurement system: fps (US customary, default) or metric.
+    @Published var unitSystem: UnitSystem = .fps
     @Published var selectMode: SelectMode = .videos
     @Published var thresholdField: String?
     @Published var thresholdOp = ">"
@@ -342,7 +344,8 @@ final class AppModel: ObservableObject {
         )
         let overlayBody = ConfigBuilder.overlayYAML(
             selected: selectedFields,
-            includeMap: includeMap && (inspect?.hasGps ?? false)
+            includeMap: includeMap && (inspect?.hasGps ?? false),
+            unitSystem: unitSystem
         )
         let syncBody = ConfigBuilder.syncYAML(
             fitLabel: fitLabel,
