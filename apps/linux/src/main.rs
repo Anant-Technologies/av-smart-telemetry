@@ -75,6 +75,8 @@ struct State {
     inspect: Option<InspectPayload>,
     selected: Vec<String>,
     include_map: bool,
+    /// "fps" (US customary, default) or "metric"
+    unit_system: String,
     mode: String,
     threshold_field: String,
     threshold_value: f64,
@@ -98,6 +100,7 @@ impl Default for State {
             inspect: None,
             selected: Vec::new(),
             include_map: false,
+            unit_system: "fps".into(),
             mode: "videos".into(),
             threshold_field: "speed".into(),
             threshold_value: 0.0,
@@ -145,16 +148,100 @@ fn run_inspect(fit: &Path) -> Result<InspectPayload, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+fn display_unit(field: &str, unit_system: &str, fallback: &str) -> String {
+    let fps = unit_system != "metric";
+    match (fps, field) {
+        (true, "speed") => "mph".into(),
+        (true, "altitude") => "ft".into(),
+        (true, "distance") => "mi".into(),
+        (true, "temperature") | (true, "core_temperature") => "°F".into(),
+        (true, "vertical_oscillation") | (true, "step_length") => "in".into(),
+        (false, "speed") => "km/h".into(),
+        (false, "altitude") | (false, "distance") => "m".into(),
+        (false, "temperature") | (false, "core_temperature") => "°C".into(),
+        _ => fallback.to_string(),
+    }
+}
+
+fn convert_si(field: &str, raw: f64, unit_system: &str) -> f64 {
+    if unit_system != "metric" {
+        return match field {
+            "speed" => raw * 2.236936,
+            "altitude" => raw * 3.28084,
+            "distance" => raw / 1609.344,
+            "temperature" | "core_temperature" => raw * 9.0 / 5.0 + 32.0,
+            "vertical_oscillation" | "step_length" => raw / 25.4,
+            _ => raw,
+        };
+    }
+    if field == "speed" {
+        raw * 3.6
+    } else {
+        raw
+    }
+}
+
+fn format_range_val(v: f64) -> String {
+    let a = v.abs();
+    if a >= 100.0 {
+        format!("{v:.0}")
+    } else if a >= 10.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.3}")
+    }
+}
+
+fn range_caption(field: &InspectField, unit_system: &str) -> String {
+    let fallback = field.unit.clone().unwrap_or_default();
+    let unit = display_unit(&field.name, unit_system, &fallback);
+    let mn = field
+        .min
+        .map(|v| format_range_val(convert_si(&field.name, v, unit_system)))
+        .unwrap_or_else(|| "-".into());
+    let mx = field
+        .max
+        .map(|v| format_range_val(convert_si(&field.name, v, unit_system)))
+        .unwrap_or_else(|| "-".into());
+    if unit.is_empty() {
+        format!("{mn} – {mx}")
+    } else {
+        format!("{unit}  {mn} – {mx}")
+    }
+}
+
 fn overlay_yaml(state: &State) -> String {
-    let formats: &[(&str, &str)] = &[
-        ("speed", "{value:.1f} km/h"),
-        ("heart_rate", "{value:.0f} bpm"),
-        ("grade", "{value:.1f}%"),
-        ("power", "{value:.0f} W"),
-        ("cadence", "{value:.0f}"),
-        ("altitude", "{value:.0f} m"),
-    ];
-    let mut s = String::from("overlay:\n  text:\n");
+    let unit = if state.unit_system == "metric" {
+        "metric"
+    } else {
+        "fps"
+    };
+    let formats: &[(&str, &str)] = if unit == "metric" {
+        &[
+            ("speed", "{value:.1f} km/h"),
+            ("heart_rate", "{value:.0f} bpm"),
+            ("grade", "{value:.1f}%"),
+            ("power", "{value:.0f} W"),
+            ("cadence", "{value:.0f}"),
+            ("altitude", "{value:.0f} m"),
+            ("distance", "{value:.0f} m"),
+            ("temperature", "{value:.1f} °C"),
+            ("core_temperature", "{value:.1f} °C"),
+        ]
+    } else {
+        &[
+            ("speed", "{value:.1f} mph"),
+            ("heart_rate", "{value:.0f} bpm"),
+            ("grade", "{value:.1f}%"),
+            ("power", "{value:.0f} W"),
+            ("cadence", "{value:.0f}"),
+            ("altitude", "{value:.0f} ft"),
+            ("distance", "{value:.2f} mi"),
+            ("temperature", "{value:.1f} °F"),
+            ("core_temperature", "{value:.1f} °F"),
+        ]
+    };
+    let mut s = format!("overlay:\n  unit_system: {unit}\n  text:\n");
     let fields: Vec<&InspectField> = state
         .inspect
         .as_ref()
@@ -178,6 +265,7 @@ fn overlay_yaml(state: &State) -> String {
             s.push_str(&format!("    - field: {}\n", f.name));
             s.push_str(&format!("      format: \"{fmt}\"\n"));
             s.push_str(&format!("      label: \"{}\"\n", f.label));
+            s.push_str(&format!("      unit_system: {unit}\n"));
             s.push_str(&format!("      position: [0.02, {y:.3}]\n"));
         }
     }
@@ -887,26 +975,47 @@ fn build_ui(app: &Application) {
     };
     *refresh_dock_slot.borrow_mut() = Some(refresh_dock.clone());
 
+    let rebuild_fields_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
     let rebuild_fields = {
         let field_box = field_box.clone();
         let state = state.clone();
+        let rebuild_fields_slot = rebuild_fields_slot.clone();
         Rc::new(move || {
             while let Some(c) = field_box.first_child() {
                 field_box.remove(&c);
             }
             field_box.append(&Label::new(Some("Telemetry")));
+            let units = DropDown::from_strings(&["FPS", "Metric"]);
+            units.set_selected(if state.borrow().unit_system == "metric" { 1 } else { 0 });
+            let state_u = state.clone();
+            let rebuild_slot = rebuild_fields_slot.clone();
+            units.connect_selected_notify(move |dd| {
+                let next = if dd.selected() == 1 {
+                    "metric".to_string()
+                } else {
+                    "fps".to_string()
+                };
+                {
+                    let mut st = state_u.borrow_mut();
+                    if st.unit_system == next {
+                        return;
+                    }
+                    st.unit_system = next;
+                }
+                if let Some(f) = rebuild_slot.borrow().clone() {
+                    f();
+                }
+            });
+            field_box.append(&Label::new(Some("Units")));
+            field_box.append(&units);
             let st = state.borrow().clone();
             if let Some(inspect) = st.inspect {
                 for f in inspect.fields {
                     let name = f.name.clone();
                     let checked = st.selected.iter().any(|n| n == &name);
-                    let cb = CheckButton::with_label(&format!(
-                        "{} ({} {:?}-{:?})",
-                        f.label,
-                        f.unit.clone().unwrap_or_default(),
-                        f.min,
-                        f.max
-                    ));
+                    let caption = range_caption(&f, &st.unit_system);
+                    let cb = CheckButton::with_label(&format!("{} ({})", f.label, caption));
                     cb.set_active(checked);
                     let state2 = state.clone();
                     cb.connect_toggled(move |btn| {
@@ -933,6 +1042,8 @@ fn build_ui(app: &Application) {
             }
         })
     };
+
+    *rebuild_fields_slot.borrow_mut() = Some(rebuild_fields.clone());
 
     {
         let window = window.clone();

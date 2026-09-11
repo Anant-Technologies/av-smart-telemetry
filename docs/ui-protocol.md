@@ -110,11 +110,16 @@ select:
 
 ### `overlay.yaml`
 
+Default measurement system is **FPS** (US customary: mph, ft, °F). Use `metric` for km/h, m, °C.
+CLI override: `--unit-system fps|metric`.
+
 ```yaml
 overlay:
+  unit_system: fps
   text:
     - field: speed
-      format: "{value:.1f} km/h"
+      format: "{value:.1f} mph"
+      unit_system: fps
       position: [0.02, 0.88]
   map:
     style: route-only

@@ -220,8 +220,8 @@ Two overlay element types, both driven by `Activity.interpolate(t)` (§4) so the
 class TextOverlayElement:
     field: str                    # e.g. "speed", "heart_rate", "power" — checked against fitvid inspect
     label: str | None             # e.g. "Speed" — None = no label, value only
-    format: str                   # e.g. "{value:.1f} km/h"
-    unit_system: Literal["metric", "imperial"] = "metric"
+    format: str                   # e.g. "{value:.1f} mph" or "{value:.1f} km/h"
+    unit_system: Literal["metric", "imperial", "fps"] = "fps"  # fps = US customary; imperial alias
     anchor: Literal["top-left", "top-right", "bottom-left", "bottom-right", "center"] | None = None
     position: tuple[int, int] | tuple[float, float] | None = None   # explicit px or 0–1 fraction, overrides anchor
     margin: int = 24              # px from the edge when using an anchor

@@ -1,12 +1,28 @@
 {
+  "default_unit_system": "fps",
   "formats": {
-    "speed": "{value:.1f} km/h",
-    "heart_rate": "{value:.0f} bpm",
-    "grade": "{value:.1f}%",
-    "power": "{value:.0f} W",
-    "cadence": "{value:.0f}",
-    "altitude": "{value:.0f} m",
-    "distance": "{value:.0f} m"
+    "metric": {
+      "speed": "{value:.1f} km/h",
+      "heart_rate": "{value:.0f} bpm",
+      "grade": "{value:.1f}%",
+      "power": "{value:.0f} W",
+      "cadence": "{value:.0f}",
+      "altitude": "{value:.0f} m",
+      "distance": "{value:.0f} m",
+      "temperature": "{value:.1f} °C",
+      "core_temperature": "{value:.1f} °C"
+    },
+    "fps": {
+      "speed": "{value:.1f} mph",
+      "heart_rate": "{value:.0f} bpm",
+      "grade": "{value:.1f}%",
+      "power": "{value:.0f} W",
+      "cadence": "{value:.0f}",
+      "altitude": "{value:.0f} ft",
+      "distance": "{value:.2f} mi",
+      "temperature": "{value:.1f} °F",
+      "core_temperature": "{value:.1f} °F"
+    }
   },
   "anchors": ["bottom-left", "bottom-right", "top-left", "top-right", "center"],
   "default_selected": ["speed", "heart_rate", "grade"]

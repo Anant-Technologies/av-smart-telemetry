@@ -18,7 +18,12 @@ from fitvid.fit_parser import parse_fit
 from fitvid.media import load_audio_source, load_video_source
 from fitvid.models import Activity, AudioSource, ClipSpec, SyncResult, VideoSource
 from fitvid.overlay.burn import burn_overlay
-from fitvid.overlay.composite import OverlayConfig, load_overlay_config, validate_overlay_fields
+from fitvid.overlay.composite import (
+    OverlayConfig,
+    apply_unit_system,
+    load_overlay_config,
+    validate_overlay_fields,
+)
 from fitvid.resolve import resolve_all_videos, resolve_clips
 from fitvid.selectors.base import MergeOptions, TimeRange, merge_ranges
 from fitvid.selectors.lap import LapSelector
@@ -57,6 +62,8 @@ class CompileConfig:
     activity_index: int = 0
     reencode: bool = False
     overlay_fps: float = 10.0
+    # Overlay measurement system: fps (US customary, default) | metric
+    unit_system: str | None = None
     events: EventEmitter | None = None
 
 
@@ -293,6 +300,9 @@ def compile_video(cfg: CompileConfig) -> CompileResult:
     overlay: OverlayConfig | None = None
     if cfg.overlay_path:
         overlay = load_overlay_config(cfg.overlay_path)
+        if cfg.unit_system:
+            apply_unit_system(overlay, cfg.unit_system)
+            ev.log(f"Overlay unit system: {overlay.unit_system}")
         validate_overlay_fields(activity, overlay)
         ev.log(f"Overlay config: {cfg.overlay_path}")
 

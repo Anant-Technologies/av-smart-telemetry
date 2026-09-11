@@ -192,6 +192,13 @@ struct FieldPickerView: View {
                 .font(.headline)
                 .padding(.horizontal)
                 .padding(.top)
+            Picker("Units", selection: $model.unitSystem) {
+                ForEach(UnitSystem.allCases) { system in
+                    Text(system.rawValue).tag(system)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
             List {
                 if let inspect = model.inspect {
                     ForEach(grouped(inspect.fields), id: \.0) { category, fields in
@@ -234,10 +241,7 @@ struct FieldPickerView: View {
     }
 
     private func secondary(_ f: InspectField) -> String {
-        let unit = f.unit ?? ""
-        let mn = f.min.map { String(format: "%.3g", $0) } ?? "-"
-        let mx = f.max.map { String(format: "%.3g", $0) } ?? "-"
-        return "\(unit)  \(mn) – \(mx)"
+        UnitDisplay.rangeCaption(field: f, system: model.unitSystem)
     }
 }
 

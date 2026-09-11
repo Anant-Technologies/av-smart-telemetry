@@ -10,6 +10,7 @@ import yaml
 
 from fitvid.inspect import require_fields
 from fitvid.models import Activity, MapOverlayElement, TextOverlayElement
+from fitvid.units import FORMATS, normalize_unit_system, overlay_format
 
 
 @dataclass
@@ -18,22 +19,41 @@ class OverlayConfig:
     map: MapOverlayElement | None = None
     allow_overlap: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    unit_system: str = "fps"
+
+
+def apply_unit_system(cfg: OverlayConfig, system: str) -> None:
+    """Force every text element onto ``system`` and refresh known format strings."""
+    sys = normalize_unit_system(system)
+    cfg.unit_system = sys
+    for el in cfg.text:
+        el.unit_system = sys
+        if el.field in FORMATS[sys]:
+            el.format = overlay_format(el.field, sys)
 
 
 def load_overlay_config(path: str | Path) -> OverlayConfig:
     path = Path(path)
     data = yaml.safe_load(path.read_text()) or {}
     overlay = data.get("overlay", data)
+    default_system = normalize_unit_system(overlay.get("unit_system"), default="fps")
     text_els: list[TextOverlayElement] = []
     for item in overlay.get("text") or []:
         pos = item.get("position")
         position = tuple(pos) if pos is not None else None
+        field_name = item["field"]
+        system = normalize_unit_system(
+            item.get("unit_system"), default=default_system
+        )
+        fmt = item.get("format")
+        if not fmt:
+            fmt = overlay_format(field_name, system)
         text_els.append(
             TextOverlayElement(
-                field=item["field"],
-                format=item.get("format", "{value}"),
+                field=field_name,
+                format=fmt,
                 label=item.get("label"),
-                unit_system=item.get("unit_system", "metric"),
+                unit_system=system,
                 anchor=item.get("anchor"),
                 position=position,  # type: ignore[arg-type]
                 margin=int(item.get("margin", 24)),
@@ -65,6 +85,7 @@ def load_overlay_config(path: str | Path) -> OverlayConfig:
         map=map_el,
         allow_overlap=bool(overlay.get("allow_overlap", False)),
         raw=overlay,
+        unit_system=default_system,
     )
     if not cfg.allow_overlap:
         # Anchor cycling (e.g. UI pickers) can stack many fields on the same

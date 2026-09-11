@@ -287,7 +287,8 @@ class TextOverlayElement:
     field: str
     format: str = "{value}"
     label: str | None = None
-    unit_system: Literal["metric", "imperial"] = "metric"
+    # fps = foot–pound–second / US customary (default); imperial is a YAML alias
+    unit_system: Literal["metric", "imperial", "fps"] = "fps"
     anchor: Anchor | None = None
     position: tuple[float, float] | None = None
     margin: int = 24

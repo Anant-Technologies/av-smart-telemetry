@@ -45,7 +45,12 @@
         <Border Grid.Column="0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0" Padding="12">
           <StackPanel>
             <TextBlock Text="Telemetry" FontWeight="SemiBold" Margin="0,0,0,8"/>
-            <ListView x:Name="FieldList" Height="420"/>
+            <TextBlock Text="Units" Opacity="0.7" FontSize="12" Margin="0,0,0,4"/>
+            <ComboBox x:Name="UnitSystemBox" SelectionChanged="UnitSystem_SelectionChanged" SelectedIndex="0" Margin="0,0,0,8" Width="200">
+              <ComboBoxItem Content="FPS"/>
+              <ComboBoxItem Content="Metric"/>
+            </ComboBox>
+            <ListView x:Name="FieldList" Height="380"/>
             <ToggleSwitch x:Name="MapToggle" Header="Route map overlay" Toggled="MapToggle_Toggled" Visibility="Collapsed"/>
           </StackPanel>
         </Border>

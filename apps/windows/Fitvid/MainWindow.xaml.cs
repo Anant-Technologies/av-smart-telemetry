@@ -361,7 +361,7 @@ public sealed partial class MainWindow : Window
             {
                 var toggle = new ToggleSwitch
                 {
-                    Header = $"{field.Label}  ({field.Unit} {field.Min:G4}–{field.Max:G4})",
+                    Header = $"{field.Label}  ({UnitDisplay.RangeCaption(field, _state.UnitSystem)})",
                     IsOn = _state.SelectedFields.Contains(field.Name),
                     Tag = field.Name
                 };
@@ -502,6 +502,20 @@ public sealed partial class MainWindow : Window
         _state.IncludeMap = MapToggle.IsOn;
     }
 
+    private void UnitSystem_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (UnitSystemBox.SelectedItem is ComboBoxItem item)
+        {
+            var next = string.Equals(item.Content?.ToString(), "Metric", StringComparison.OrdinalIgnoreCase)
+                ? "metric"
+                : "fps";
+            if (string.Equals(_state.UnitSystem, next, StringComparison.OrdinalIgnoreCase))
+                return;
+            _state.UnitSystem = next;
+            RefreshFieldList();
+        }
+    }
+
     private async void AddVideos_Click(object sender, RoutedEventArgs e)
     {
         await PickVideosAsync(replace: false);
@@ -594,6 +608,55 @@ public sealed partial class MainWindow : Window
 enum WizardStep { Fit, SyncFit, Videos, SyncCameras, Audio, SyncAudio, Ready }
 enum SelectMode { Videos, Laps, Threshold, Manual }
 
+static class UnitDisplay
+{
+    public static string RangeCaption(InspectField field, string unitSystem)
+    {
+        var fps = !string.Equals(unitSystem, "metric", StringComparison.OrdinalIgnoreCase);
+        var unit = DisplayUnit(field.Name, fps, field.Unit);
+        var mn = field.Min is double a ? Format(ConvertSi(a, field.Name, fps)) : "-";
+        var mx = field.Max is double b ? Format(ConvertSi(b, field.Name, fps)) : "-";
+        return string.IsNullOrEmpty(unit) ? $"{mn} – {mx}" : $"{unit}  {mn} – {mx}";
+    }
+
+    static string DisplayUnit(string name, bool fps, string? fallback) => (fps, name) switch
+    {
+        (true, "speed") => "mph",
+        (true, "altitude") => "ft",
+        (true, "distance") => "mi",
+        (true, "temperature") or (true, "core_temperature") => "°F",
+        (true, "vertical_oscillation") or (true, "step_length") => "in",
+        (false, "speed") => "km/h",
+        (false, "altitude") or (false, "distance") => "m",
+        (false, "temperature") or (false, "core_temperature") => "°C",
+        _ => fallback ?? ""
+    };
+
+    static double ConvertSi(double raw, string field, bool fps)
+    {
+        if (fps)
+        {
+            return field switch
+            {
+                "speed" => raw * 2.236936,
+                "altitude" => raw * 3.28084,
+                "distance" => raw / 1609.344,
+                "temperature" or "core_temperature" => raw * 9.0 / 5.0 + 32.0,
+                "vertical_oscillation" or "step_length" => raw / 25.4,
+                _ => raw
+            };
+        }
+        return field == "speed" ? raw * 3.6 : raw;
+    }
+
+    static string Format(double v)
+    {
+        if (Math.Abs(v) >= 100) return v.ToString("0");
+        if (Math.Abs(v) >= 10) return v.ToString("0.0");
+        return v.ToString("G4");
+    }
+}
+
 sealed class AppState
 {
     public WizardStep Step { get; set; } = WizardStep.Fit;
@@ -601,6 +664,8 @@ sealed class AppState
     public InspectPayload? Inspect { get; set; }
     public HashSet<string> SelectedFields { get; set; } = new();
     public bool IncludeMap { get; set; }
+    /// fps (US customary, default) | metric
+    public string UnitSystem { get; set; } = "fps";
     public SelectMode Mode { get; set; } = SelectMode.Videos;
     public string? ThresholdField { get; set; }
     public string ThresholdOp { get; set; } = ">";
@@ -754,7 +819,7 @@ sealed class InspectField
 
 static class ConfigBuilder
 {
-    static readonly Dictionary<string, string> Formats = new()
+    static readonly Dictionary<string, string> FormatsMetric = new()
     {
         ["speed"] = "{value:.1f} km/h",
         ["heart_rate"] = "{value:.0f} bpm",
@@ -762,11 +827,34 @@ static class ConfigBuilder
         ["power"] = "{value:.0f} W",
         ["cadence"] = "{value:.0f}",
         ["altitude"] = "{value:.0f} m",
+        ["distance"] = "{value:.0f} m",
+        ["temperature"] = "{value:.1f} °C",
+        ["core_temperature"] = "{value:.1f} °C",
+    };
+    static readonly Dictionary<string, string> FormatsFps = new()
+    {
+        ["speed"] = "{value:.1f} mph",
+        ["heart_rate"] = "{value:.0f} bpm",
+        ["grade"] = "{value:.1f}%",
+        ["power"] = "{value:.0f} W",
+        ["cadence"] = "{value:.0f}",
+        ["altitude"] = "{value:.0f} ft",
+        ["distance"] = "{value:.2f} mi",
+        ["temperature"] = "{value:.1f} °F",
+        ["core_temperature"] = "{value:.1f} °F",
     };
 
     public static string OverlayYaml(AppState s)
     {
-        var sb = new StringBuilder("overlay:\n  text:\n");
+        var formats = string.Equals(s.UnitSystem, "metric", StringComparison.OrdinalIgnoreCase)
+            ? FormatsMetric
+            : FormatsFps;
+        var unit = string.Equals(s.UnitSystem, "metric", StringComparison.OrdinalIgnoreCase)
+            ? "metric"
+            : "fps";
+        var sb = new StringBuilder("overlay:\n");
+        sb.AppendLine($"  unit_system: {unit}");
+        sb.AppendLine("  text:");
         var selected = s.Inspect?.Fields.Where(f => s.SelectedFields.Contains(f.Name)).ToList() ?? [];
         if (selected.Count == 0) sb.AppendLine("    []");
         else
@@ -774,11 +862,12 @@ static class ConfigBuilder
             for (var i = 0; i < selected.Count; i++)
             {
                 var f = selected[i];
-                var fmt = Formats.GetValueOrDefault(f.Name, "{value}");
+                var fmt = formats.GetValueOrDefault(f.Name, "{value}");
                 var y = Math.Max(0.04, 0.88 - i * 0.065);
                 sb.AppendLine($"    - field: {f.Name}");
                 sb.AppendLine($"      format: \"{fmt}\"");
                 sb.AppendLine($"      label: \"{f.Label}\"");
+                sb.AppendLine($"      unit_system: {unit}");
                 sb.AppendLine($"      position: [0.02, {y:0.000}]");
             }
         }

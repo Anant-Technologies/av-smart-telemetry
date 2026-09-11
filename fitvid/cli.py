@@ -154,6 +154,12 @@ def compile_cmd(
         exists=True,
         help="YAML with FIT generator + camera/audio device clock sync",
     ),
+    unit_system: Optional[str] = typer.Option(
+        None,
+        "--unit-system",
+        help="Overlay units: fps (US customary, default in YAML) | metric. "
+        "Overrides unit_system in --overlay when set.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Select, cut, mux, overlay, and concatenate highlight video."""
@@ -220,6 +226,7 @@ def compile_cmd(
         dry_run=dry_run,
         activity_index=session,
         events=events if json_events else None,
+        unit_system=unit_system,
     )
 
     try:

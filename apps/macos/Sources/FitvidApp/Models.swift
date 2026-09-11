@@ -190,8 +190,68 @@ enum LocalTimeSync {
     }
 }
 
+enum UnitSystem: String, CaseIterable, Identifiable {
+    case fps = "FPS"
+    case metric = "Metric"
+    var id: String { rawValue }
+    /// Value written into overlay YAML (`fps` | `metric`).
+    var yamlValue: String {
+        switch self {
+        case .fps: return "fps"
+        case .metric: return "metric"
+        }
+    }
+}
+
+enum UnitDisplay {
+    /// Convert FIT SI min/max into the active measurement system for picker captions.
+    static func rangeCaption(field: InspectField, system: UnitSystem) -> String {
+        let unit = displayUnit(for: field.name, system: system, fallback: field.unit)
+        let mn = field.min.map { format($0, field: field.name, system: system) } ?? "-"
+        let mx = field.max.map { format($0, field: field.name, system: system) } ?? "-"
+        if unit.isEmpty { return "\(mn) – \(mx)" }
+        return "\(unit)  \(mn) – \(mx)"
+    }
+
+    static func displayUnit(for name: String, system: UnitSystem, fallback: String?) -> String {
+        switch (system, name) {
+        case (.fps, "speed"): return "mph"
+        case (.fps, "altitude"): return "ft"
+        case (.fps, "distance"): return "mi"
+        case (.fps, "temperature"), (.fps, "core_temperature"): return "°F"
+        case (.fps, "vertical_oscillation"), (.fps, "step_length"): return "in"
+        case (.metric, "speed"): return "km/h"
+        case (.metric, "altitude"), (.metric, "distance"): return "m"
+        case (.metric, "temperature"), (.metric, "core_temperature"): return "°C"
+        default: return fallback ?? ""
+        }
+    }
+
+    static func convertSI(_ raw: Double, field: String, system: UnitSystem) -> Double {
+        if system == .fps {
+            switch field {
+            case "speed": return raw * 2.236936
+            case "altitude": return raw * 3.28084
+            case "distance": return raw / 1609.344
+            case "temperature", "core_temperature": return raw * 9.0 / 5.0 + 32.0
+            case "vertical_oscillation", "step_length": return raw / 25.4
+            default: return raw
+            }
+        }
+        if field == "speed" { return raw * 3.6 } // m/s → km/h
+        return raw
+    }
+
+    private static func format(_ raw: Double, field: String, system: UnitSystem) -> String {
+        let v = convertSI(raw, field: field, system: system)
+        if abs(v) >= 100 { return String(format: "%.0f", v) }
+        if abs(v) >= 10 { return String(format: "%.1f", v) }
+        return String(format: "%.3g", v)
+    }
+}
+
 enum FieldDefaults {
-    static let formats: [String: String] = [
+    static let formatsMetric: [String: String] = [
         "speed": "{value:.1f} km/h",
         "heart_rate": "{value:.0f} bpm",
         "grade": "{value:.1f}%",
@@ -199,10 +259,24 @@ enum FieldDefaults {
         "cadence": "{value:.0f}",
         "altitude": "{value:.0f} m",
         "distance": "{value:.0f} m",
+        "temperature": "{value:.1f} °C",
+        "core_temperature": "{value:.1f} °C",
+    ]
+    static let formatsFPS: [String: String] = [
+        "speed": "{value:.1f} mph",
+        "heart_rate": "{value:.0f} bpm",
+        "grade": "{value:.1f}%",
+        "power": "{value:.0f} W",
+        "cadence": "{value:.0f}",
+        "altitude": "{value:.0f} ft",
+        "distance": "{value:.2f} mi",
+        "temperature": "{value:.1f} °F",
+        "core_temperature": "{value:.1f} °F",
     ]
 
-    static func format(for name: String) -> String {
-        formats[name] ?? "{value}"
+    static func format(for name: String, system: UnitSystem) -> String {
+        let table = system == .fps ? formatsFPS : formatsMetric
+        return table[name] ?? "{value}"
     }
 
     static func position(at index: Int) -> (Double, Double) {
@@ -212,17 +286,26 @@ enum FieldDefaults {
 }
 
 enum ConfigBuilder {
-    static func overlayYAML(selected: [InspectField], includeMap: Bool) -> String {
-        var lines: [String] = ["overlay:", "  text:"]
+    static func overlayYAML(
+        selected: [InspectField],
+        includeMap: Bool,
+        unitSystem: UnitSystem = .fps
+    ) -> String {
+        var lines: [String] = [
+            "overlay:",
+            "  unit_system: \(unitSystem.yamlValue)",
+            "  text:",
+        ]
         if selected.isEmpty {
             lines.append("    []")
         } else {
             for (i, field) in selected.enumerated() {
-                let fmt = FieldDefaults.format(for: field.name)
+                let fmt = FieldDefaults.format(for: field.name, system: unitSystem)
                 let (x, y) = FieldDefaults.position(at: i)
                 lines.append("    - field: \(field.name)")
                 lines.append("      format: \"\(fmt)\"")
                 lines.append("      label: \"\(field.label)\"")
+                lines.append("      unit_system: \(unitSystem.yamlValue)")
                 lines.append("      position: [\(String(format: "%.3f", x)), \(String(format: "%.3f", y))]")
             }
         }
