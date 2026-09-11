@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: fitvid-macos-arm64
+            platform: macos
+          - os: windows-latest
+            artifact: fitvid-windows-x64
+            platform: windows
+          - os: ubuntu-latest
+            artifact: fitvid-linux-x64
+            platform: linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyinstaller
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Build fitvid CLI (PyInstaller)
+        run: pyinstaller fitvid-cli.spec --noconfirm
+
+      - name: Stage CLI binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ -f dist/fitvid/fitvid ]]; then cp dist/fitvid/fitvid dist/fitvid_cli_bin || true; fi
+          if [[ -f dist/fitvid.exe ]]; then cp dist/fitvid.exe dist/fitvid_cli_bin.exe; fi
+          if [[ -f dist/fitvid ]]; then cp dist/fitvid dist/fitvid_cli_bin || cp dist/fitvid dist/fitvid; fi
+          ls -la dist || true
+
+      - name: macOS native UI
+        if: matrix.platform == 'macos'
+        run: |
+          brew install create-dmg || true
+          chmod +x scripts/build_macos_app.sh
+          # Prefer onefile CLI output
+          if [[ -f dist/fitvid ]]; then true; elif [[ -f dist/fitvid/fitvid ]]; then cp dist/fitvid/fitvid dist/fitvid; fi
+          scripts/build_macos_app.sh --dmg
+          mkdir -p artifacts
+          cp dist/macos/*.dmg artifacts/ 2>/dev/null || cp -R dist/macos/Fitvid.app artifacts/
+          (cd dist/macos && zip -r ../../artifacts/${{ matrix.artifact }}.zip Fitvid.app)
+
+      - name: Setup .NET
+        if: matrix.platform == 'windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Windows native UI
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          chmod +x scripts/build_windows_app.sh
+          if [[ -f dist/fitvid.exe ]]; then cp dist/fitvid.exe dist/fitvid.exe; fi
+          scripts/build_windows_app.sh || dotnet publish apps/windows/Fitvid/Fitvid.csproj -c Release -r win-x64 --self-contained true -o dist/windows/Fitvid
+          mkdir -p artifacts
+          cp dist/windows/*.zip artifacts/ 2>/dev/null || (cd dist/windows && zip -r ../../artifacts/${{ matrix.artifact }}.zip Fitvid)
+
+      - name: Setup Rust
+        if: matrix.platform == 'linux'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux deps
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libglib2.0-dev pkg-config
+
+      - name: Linux native UI
+        if: matrix.platform == 'linux'
+        run: |
+          chmod +x scripts/build_linux_app.sh
+          if [[ -f dist/fitvid ]]; then true; elif [[ -f dist/fitvid/fitvid ]]; then cp dist/fitvid/fitvid dist/fitvid; fi
+          scripts/build_linux_app.sh
+          mkdir -p artifacts
+          cp dist/linux/*.AppImage artifacts/ 2>/dev/null || cp dist/linux/*.tar.gz artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
