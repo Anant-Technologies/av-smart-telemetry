@@ -3,8 +3,15 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Foundation;
+using Windows.Media.Core;
+using Windows.Media.Playback;
+using Windows.Storage;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 
@@ -14,6 +21,15 @@ public sealed partial class MainWindow : Window
 {
     private readonly AppState _state = new();
     private readonly FitvidCli _cli = new();
+    private DateTimeOffset? _previewClipStart;
+    private DateTimeOffset? _domainStart;
+    private DateTimeOffset? _domainEnd;
+    private double _scrubProgress;
+    private DateTimeOffset? _scrubWall;
+    private Action? _redrawChart;
+    private bool _seekingFromScrubber;
+    private bool _userScrubbing;
+    private DispatcherQueueTimer? _scrubPollTimer;
 
     public MainWindow()
     {
@@ -35,6 +51,7 @@ public sealed partial class MainWindow : Window
         MainPanel.Visibility = Visibility.Visible;
         RefreshFieldList();
         RefreshMediaDock();
+        _ = ReloadSeriesAsync();
     }
 
     private void UpdateWizardCopy()
@@ -370,6 +387,7 @@ public sealed partial class MainWindow : Window
                     var name = (string)((ToggleSwitch)s!).Tag;
                     if (((ToggleSwitch)s).IsOn) _state.SelectedFields.Add(name);
                     else _state.SelectedFields.Remove(name);
+                    _ = ReloadSeriesAsync();
                 };
                 FieldList.Items.Add(toggle);
             }
@@ -420,9 +438,44 @@ public sealed partial class MainWindow : Window
         {
             var row = new StackPanel { Spacing = 4, Padding = new Thickness(6) };
             var nameRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            if (isVideo)
+            {
+                var thumb = new Image
+                {
+                    Width = 96,
+                    Height = 54,
+                    Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+                    Tag = clip
+                };
+                _ = LoadThumbnailAsync(thumb, clip.Path);
+                thumb.DoubleTapped += PreviewClip_DoubleTapped;
+                ToolTipService.SetToolTip(thumb, "Double-click to preview");
+                nameRow.Children.Add(thumb);
+            }
+            else
+            {
+                var audioIcon = new Border
+                {
+                    Width = 96,
+                    Height = 54,
+                    CornerRadius = new CornerRadius(6),
+                    Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+                    Child = new TextBlock
+                    {
+                        Text = "🔊",
+                        FontSize = 22,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    },
+                    Tag = clip
+                };
+                audioIcon.DoubleTapped += PreviewClip_DoubleTapped;
+                ToolTipService.SetToolTip(audioIcon, "Double-click to preview audio");
+                nameRow.Children.Add(audioIcon);
+            }
             nameRow.Children.Add(new TextBlock
             {
-                Text = (isVideo ? "🎬 " : "🔊 ") + Path.GetFileName(clip.Path),
+                Text = Path.GetFileName(clip.Path),
                 FontSize = 12,
                 VerticalAlignment = VerticalAlignment.Center
             });
@@ -513,7 +566,384 @@ public sealed partial class MainWindow : Window
                 return;
             _state.UnitSystem = next;
             RefreshFieldList();
+            _ = ReloadSeriesAsync();
         }
+    }
+
+    private async Task LoadThumbnailAsync(Image image, string videoPath)
+    {
+        try
+        {
+            var tmp = Path.Combine(Path.GetTempPath(), $"fitvid-thumb-{Path.GetFileName(videoPath).GetHashCode():x}.jpg");
+            await Task.Run(() => _cli.Run(["thumbnail", videoPath, "--out", tmp, "--width", "192"]));
+            if (!File.Exists(tmp)) return;
+            image.Source = new BitmapImage(new Uri(tmp));
+        }
+        catch { /* keep empty thumb */ }
+    }
+
+    private List<ChartSeries> _chartSeries = new();
+
+    private async void PreviewClip_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        MediaClip? clip = null;
+        if (sender is FrameworkElement { Tag: MediaClip c })
+            clip = c;
+        if (clip is null || string.IsNullOrWhiteSpace(clip.Path) || !File.Exists(clip.Path))
+            return;
+        await OpenPreviewAsync(clip);
+    }
+
+    private async Task OpenPreviewAsync(MediaClip clip)
+    {
+        try
+        {
+            StopScrubPoll();
+            var file = await StorageFile.GetFileFromPathAsync(clip.Path);
+            var source = MediaSource.CreateFromStorageFile(file);
+            PreviewPlayer.Source = source;
+            _previewClipStart = LocalTimeSync.Parse(clip.StartIso);
+            _scrubProgress = 0;
+            _scrubWall = _previewClipStart;
+            PreviewPlaceholder.Visibility = Visibility.Collapsed;
+
+            var isAudio = IsLikelyAudio(clip.Path);
+            AudioPreviewBadge.Visibility = isAudio ? Visibility.Visible : Visibility.Collapsed;
+            AudioPreviewName.Text = Path.GetFileName(clip.Path);
+
+            PreviewPlayer.MediaPlayer?.Play();
+            // Match macOS: poll playhead ~30fps. Never seek from these updates.
+            StartScrubPoll();
+            _redrawChart?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = "Preview: " + ex.Message;
+        }
+    }
+
+    private static bool IsLikelyAudio(string path)
+    {
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        return ext is ".m4a" or ".mp3" or ".wav" or ".aac" or ".flac" or ".ogg" or ".wma";
+    }
+
+    private void StartScrubPoll()
+    {
+        StopScrubPoll();
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(33);
+        timer.IsRepeating = true;
+        timer.Tick += (_, __) => PollPreviewScrubber();
+        _scrubPollTimer = timer;
+        timer.Start();
+    }
+
+    private void StopScrubPoll()
+    {
+        if (_scrubPollTimer is null) return;
+        _scrubPollTimer.Stop();
+        _scrubPollTimer = null;
+    }
+
+    /// Playback → scrubber only while actively playing. Never seeks the player.
+    private void PollPreviewScrubber()
+    {
+        if (_userScrubbing || _previewClipStart is null) return;
+        var session = PreviewPlayer.MediaPlayer?.PlaybackSession;
+        if (session is null) return;
+        // When paused/finished, leave scrubber where the user put it.
+        if (session.PlaybackState != MediaPlaybackState.Playing) return;
+        var pos = session.Position.TotalSeconds;
+        if (double.IsNaN(pos) || pos < 0) return;
+        var dur = session.NaturalDuration.TotalSeconds;
+        if (double.IsNaN(dur) || dur <= 0) dur = Math.Max(pos, 1);
+        var wall = _previewClipStart.Value.AddSeconds(pos);
+        SyncScrubberToWallTime(wall, pos, dur);
+    }
+
+    private void SyncScrubberToWallTime(DateTimeOffset wall, double videoSeconds, double videoDuration)
+    {
+        if (_userScrubbing) return;
+        double progress;
+        if (_domainStart is not null && _domainEnd is not null)
+        {
+            var span = (_domainEnd.Value - _domainStart.Value).TotalSeconds;
+            if (span > 1e-9)
+            {
+                var p = (wall - _domainStart.Value).TotalSeconds / span;
+                if (p >= -0.02 && p <= 1.02)
+                    progress = Math.Clamp(p, 0.0, 1.0);
+                else if (videoDuration > 1e-6)
+                    progress = Math.Clamp(videoSeconds / videoDuration, 0.0, 1.0);
+                else
+                    progress = _scrubProgress;
+            }
+            else if (videoDuration > 1e-6)
+                progress = Math.Clamp(videoSeconds / videoDuration, 0.0, 1.0);
+            else
+                progress = _scrubProgress;
+        }
+        else if (videoDuration > 1e-6)
+            progress = Math.Clamp(videoSeconds / videoDuration, 0.0, 1.0);
+        else
+            return;
+
+        if (Math.Abs(_scrubProgress - progress) < 0.0005 && _scrubWall == wall) return;
+        _scrubProgress = progress;
+        _scrubWall = wall;
+        _redrawChart?.Invoke();
+    }
+
+    /// Seek only while user drags AND preview is playing. Paused/finished = decoupled.
+    private void SeekPreviewToWall(DateTimeOffset wall)
+    {
+        if (!_userScrubbing) return;
+        if (_previewClipStart is null || PreviewPlayer.MediaPlayer is null) return;
+        var session = PreviewPlayer.MediaPlayer.PlaybackSession;
+        if (session.PlaybackState != MediaPlaybackState.Playing) return;
+        var offset = (wall - _previewClipStart.Value).TotalSeconds;
+        if (offset < 0) return;
+        if (Math.Abs(session.Position.TotalSeconds - offset) < 0.2) return;
+        _seekingFromScrubber = true;
+        try
+        {
+            session.Position = TimeSpan.FromSeconds(offset);
+        }
+        finally
+        {
+            _seekingFromScrubber = false;
+        }
+    }
+
+    private void UserScrubAt(double x, double width)
+    {
+        if (width <= 1) return;
+        var progress = Math.Clamp(x / width, 0.0, 1.0);
+        _scrubProgress = progress;
+        if (_domainStart is not null && _domainEnd is not null)
+        {
+            var span = (_domainEnd.Value - _domainStart.Value).TotalSeconds;
+            _scrubWall = _domainStart.Value.AddSeconds(progress * Math.Max(span, 0));
+            if (_scrubWall is not null)
+                SeekPreviewToWall(_scrubWall.Value);
+        }
+        _redrawChart?.Invoke();
+    }
+
+    private int NearestSampleIndex(DateTimeOffset wall)
+    {
+        if (_chartSeries.Count == 0) return 0;
+        var times = _chartSeries[0].Times;
+        var best = 0;
+        var bestDelta = double.MaxValue;
+        for (var i = 0; i < times.Count; i++)
+        {
+            var t = LocalTimeSync.Parse(times[i]);
+            if (t is null) continue;
+            var d = Math.Abs((t.Value - wall).TotalSeconds);
+            if (d < bestDelta)
+            {
+                bestDelta = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private async Task ReloadSeriesAsync()
+    {
+        if (_state.FitPath is null || ChartsHost is null) return;
+        try
+        {
+            var (code, stdout, _) = await Task.Run(() => _cli.Run([
+                "series", _state.FitPath,
+                "--unit-system", _state.UnitSystem,
+                "--max-points", "400"
+            ]));
+            if (code != 0) return;
+            using var doc = JsonDocument.Parse(stdout);
+            ChartsHost.Children.Clear();
+            _chartSeries.Clear();
+            if (!doc.RootElement.TryGetProperty("fields", out var fields)) return;
+            var selected = _state.SelectedFields;
+            var colors = new[]
+            {
+                Microsoft.UI.Colors.Orange,
+                Microsoft.UI.Colors.Cyan,
+                Microsoft.UI.Colors.LimeGreen,
+                Microsoft.UI.Colors.HotPink,
+                Microsoft.UI.Colors.Gold,
+                Microsoft.UI.Colors.MediumPurple,
+                Microsoft.UI.Colors.DodgerBlue,
+                Microsoft.UI.Colors.Tomato,
+            };
+            var colorIdx = 0;
+            foreach (var field in fields.EnumerateArray())
+            {
+                var name = field.GetProperty("name").GetString() ?? "";
+                if (selected.Count == 0 || !selected.Contains(name)) continue;
+                var label = field.GetProperty("label").GetString() ?? name;
+                var unit = field.TryGetProperty("unit", out var u) ? u.GetString() ?? "" : "";
+                var points = field.GetProperty("points");
+                var vals = points.EnumerateArray()
+                    .Select(p => p.GetProperty("v").GetDouble())
+                    .ToList();
+                var times = points.EnumerateArray()
+                    .Select(p => p.GetProperty("t").GetString() ?? "")
+                    .ToList();
+                if (vals.Count < 2) continue;
+                _chartSeries.Add(new ChartSeries
+                {
+                    Name = name,
+                    Label = label,
+                    Unit = unit,
+                    Values = vals,
+                    Times = times,
+                    Color = colors[colorIdx++ % colors.Length],
+                });
+            }
+            if (_chartSeries.Count == 0)
+            {
+                ChartsHost.Children.Add(new TextBlock { Text = "Select telemetry fields to plot.", Opacity = 0.6 });
+                _domainStart = null;
+                _domainEnd = null;
+                return;
+            }
+            // Continuous FIT domain (matches macOS scrubber).
+            DateTimeOffset? d0 = null, d1 = null;
+            foreach (var t in _chartSeries[0].Times)
+            {
+                var parsed = LocalTimeSync.Parse(t);
+                if (parsed is null) continue;
+                if (d0 is null || parsed < d0) d0 = parsed;
+                if (d1 is null || parsed > d1) d1 = parsed;
+            }
+            _domainStart = d0;
+            _domainEnd = d1;
+            ChartsHost.Children.Add(BuildCombinedChart());
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = "Series: " + ex.Message;
+        }
+    }
+
+    private UIElement BuildCombinedChart()
+    {
+        var root = new StackPanel { Spacing = 8, Padding = new Thickness(8) };
+        var canvas = new Canvas { Height = 200, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var readout = new TextBlock
+        {
+            FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Consolas"),
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap
+        };
+        _scrubProgress = 0;
+
+        void redraw()
+        {
+            canvas.Children.Clear();
+            var w = Math.Max(40, canvas.ActualWidth);
+            var h = canvas.ActualHeight;
+            var progress = Math.Clamp(_scrubProgress, 0, 1);
+            DateTimeOffset? wall = _scrubWall;
+            if (wall is null && _domainStart is not null && _domainEnd is not null)
+            {
+                var span = (_domainEnd.Value - _domainStart.Value).TotalSeconds;
+                wall = _domainStart.Value.AddSeconds(progress * Math.Max(span, 0));
+            }
+            var scrubIdx = wall is null ? 0 : NearestSampleIndex(wall.Value);
+
+            foreach (var series in _chartSeries)
+            {
+                var min = series.Values.Min();
+                var max = series.Values.Max();
+                var span = Math.Max(1e-9, max - min);
+                var poly = new Microsoft.UI.Xaml.Shapes.Polyline
+                {
+                    Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(series.Color),
+                    StrokeThickness = 1.75
+                };
+                for (var i = 0; i < series.Values.Count; i++)
+                {
+                    var x = i / (double)(series.Values.Count - 1) * w;
+                    var y = h - ((series.Values[i] - min) / span) * (h - 8) - 4;
+                    poly.Points.Add(new Windows.Foundation.Point(x, y));
+                }
+                canvas.Children.Add(poly);
+            }
+            var scrubX = progress * w;
+            canvas.Children.Add(new Microsoft.UI.Xaml.Shapes.Line
+            {
+                X1 = scrubX, X2 = scrubX, Y1 = 0, Y2 = h,
+                Stroke = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.White),
+                StrokeThickness = 1.5,
+                StrokeDashArray = new Microsoft.UI.Xaml.Media.DoubleCollection { 4, 3 },
+                Opacity = 0.7
+            });
+
+            var lines = new List<string>();
+            if (wall is not null)
+                lines.Add(wall.Value.ToLocalTime().ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture));
+            foreach (var series in _chartSeries)
+            {
+                var i = Math.Clamp(scrubIdx, 0, series.Values.Count - 1);
+                var num = series.Values[i];
+                var unit = string.IsNullOrEmpty(series.Unit) ? "" : " " + series.Unit;
+                lines.Add($"{series.Label}: {num:G4}{unit}");
+            }
+            readout.Text = string.Join("   ·   ", lines);
+        }
+
+        _redrawChart = redraw;
+        canvas.SizeChanged += (_, __) => redraw();
+        bool dragging = false;
+        canvas.PointerPressed += (s, e) =>
+        {
+            dragging = true;
+            _userScrubbing = true;
+            canvas.CapturePointer(e.Pointer);
+            var pt = e.GetCurrentPoint(canvas).Position;
+            UserScrubAt(pt.X, Math.Max(40, canvas.ActualWidth));
+        };
+        canvas.PointerMoved += (s, e) =>
+        {
+            if (!dragging) return;
+            var pt = e.GetCurrentPoint(canvas).Position;
+            UserScrubAt(pt.X, Math.Max(40, canvas.ActualWidth));
+        };
+        canvas.PointerReleased += (s, e) =>
+        {
+            dragging = false;
+            _userScrubbing = false;
+            canvas.ReleasePointerCapture(e.Pointer);
+        };
+        canvas.PointerCaptureLost += (_, __) =>
+        {
+            dragging = false;
+            _userScrubbing = false;
+        };
+        root.Children.Add(canvas);
+        root.Children.Add(new TextBlock
+        {
+            Text = "Drag on the chart to scrub; playback drives the line while playing.",
+            FontSize = 11,
+            Opacity = 0.6
+        });
+        root.Children.Add(readout);
+        canvas.Loaded += (_, __) => redraw();
+        return root;
+    }
+
+    sealed class ChartSeries
+    {
+        public string Name { get; set; } = "";
+        public string Label { get; set; } = "";
+        public string Unit { get; set; } = "";
+        public List<double> Values { get; set; } = new();
+        public List<string> Times { get; set; } = new();
+        public Windows.UI.Color Color { get; set; }
     }
 
     private async void AddVideos_Click(object sender, RoutedEventArgs e)

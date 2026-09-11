@@ -75,12 +75,49 @@
               <NumberBox x:Name="PadAfter" Header="Pad after (s)" Value="2" Minimum="0" Maximum="60" Width="140"/>
             </StackPanel>
             <TextBox x:Name="OutputBox" Header="Output" Text="highlight.mp4"/>
-            <StackPanel Orientation="Horizontal" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,0,28">
               <Button Content="Dry run" Click="DryRun_Click"/>
               <Button Content="Generate" Click="Compile_Click" Style="{StaticResource AccentButtonStyle}"/>
             </StackPanel>
+            <TextBlock Text="Preview / FIT telemetry" FontWeight="SemiBold" Margin="0,16,0,8"/>
+            <Grid MinHeight="240" MaxHeight="320">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Border Grid.Column="0" Background="Black" CornerRadius="6" Margin="0,0,6,0">
+                <Grid>
+                  <MediaPlayerElement x:Name="PreviewPlayer"
+                                      AreTransportControlsEnabled="True"
+                                      HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Stretch"
+                                      Stretch="Uniform"/>
+                  <TextBlock x:Name="PreviewPlaceholder"
+                             Text="Double-click a video or audio clip to preview"
+                             Foreground="Gray"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center"
+                             TextWrapping="Wrap"
+                             TextAlignment="Center"
+                             Margin="16"/>
+                  <StackPanel x:Name="AudioPreviewBadge"
+                              Visibility="Collapsed"
+                              HorizontalAlignment="Center"
+                              VerticalAlignment="Center"
+                              Spacing="6"
+                              IsHitTestVisible="False">
+                    <TextBlock Text="🔊" FontSize="36" HorizontalAlignment="Center"/>
+                    <TextBlock x:Name="AudioPreviewName" Foreground="White" Opacity="0.8"
+                               HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="220"/>
+                  </StackPanel>
+                </Grid>
+              </Border>
+              <ScrollViewer Grid.Column="1" Margin="6,0,0,0" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="ChartsHost" Spacing="10"/>
+              </ScrollViewer>
+            </Grid>
             <TextBlock Text="Log" FontWeight="SemiBold"/>
-            <TextBox x:Name="LogBox" AcceptsReturn="True" TextWrapping="Wrap" Height="220" IsReadOnly="True" FontFamily="Consolas"/>
+            <TextBox x:Name="LogBox" AcceptsReturn="True" TextWrapping="Wrap" Height="140" IsReadOnly="True" FontFamily="Consolas"/>
           </StackPanel>
         </ScrollViewer>
       </Grid>

@@ -168,6 +168,22 @@ pickFit → syncFitGenerator → pickVideos → syncCameraClocks
 4. If audio present → group recorders → enter each audio recorder clock.
 5. Compile with `--sync-config` (and `--sync none`).
 
+## `fitvid thumbnail`
+
+```bash
+fitvid thumbnail clip.mp4 --out /tmp/thumb.jpg --width 320
+```
+
+Writes a JPEG/PNG preview frame for media-dock thumbnails. Prints `{ "path", "width" }`.
+
+## `fitvid series`
+
+```bash
+fitvid series activity.fit --unit-system fps --max-points 800
+```
+
+Downsampled telemetry time series for UI charts (values converted to FPS/metric). Each field has `{ name, label, unit, points: [{ t, v }] }`.
+
 ## Locating the bundled CLI
 
 | Platform | Path relative to app |

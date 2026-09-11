@@ -2,8 +2,8 @@ use glib::object::Cast;
 use gtk::prelude::*;
 use gtk::{
     Align, Application, ApplicationWindow, Adjustment, Box as GtkBox, Button, CheckButton,
-    DropDown, Entry, FileDialog, Label, Orientation, Paned, ScrolledWindow, Separator,
-    SpinButton, TextBuffer, TextView,
+    DropDown, Entry, FileDialog, GestureClick, GestureDrag, Label, MediaFile, Orientation, Paned,
+    Picture, ScrolledWindow, Separator, SpinButton, TextBuffer, TextView, Video,
 };
 use chrono::{DateTime, FixedOffset, Local, TimeZone};
 use serde::Deserialize;
@@ -90,6 +90,7 @@ struct State {
     wall_clock: String,
     camera_groups: Vec<DeviceGroup>,
     audio_groups: Vec<DeviceGroup>,
+    series_json: String,
 }
 
 impl Default for State {
@@ -114,8 +115,176 @@ impl Default for State {
             wall_clock: String::new(),
             camera_groups: Vec::new(),
             audio_groups: Vec::new(),
+            series_json: String::new(),
         }
     }
+}
+
+/// Shared preview player ↔ FIT scrubber sync (continuous domain progress, like macOS).
+struct PreviewCtl {
+    video: Video,
+    placeholder: Label,
+    audio_badge: Label,
+    media: Option<MediaFile>,
+    clip_start: Option<DateTime<FixedOffset>>,
+    domain_start: Option<DateTime<FixedOffset>>,
+    domain_end: Option<DateTime<FixedOffset>>,
+    scrub_progress: Option<Rc<RefCell<f64>>>,
+    scrub_wall: Option<Rc<RefCell<Option<DateTime<FixedOffset>>>>>,
+    update_ui: Option<Rc<dyn Fn()>>,
+    user_scrubbing: bool,
+    poll_source: Option<glib::SourceId>,
+}
+
+impl PreviewCtl {
+    fn new(video: Video, placeholder: Label, audio_badge: Label) -> Self {
+        Self {
+            video,
+            placeholder,
+            audio_badge,
+            media: None,
+            clip_start: None,
+            domain_start: None,
+            domain_end: None,
+            scrub_progress: None,
+            scrub_wall: None,
+            update_ui: None,
+            user_scrubbing: false,
+            poll_source: None,
+        }
+    }
+}
+
+fn is_likely_audio(path: &Path) -> bool {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "m4a" | "mp3" | "wav" | "aac" | "flac" | "ogg" | "wma" => true,
+        _ => false,
+    }
+}
+
+fn open_preview(ctl: &Rc<RefCell<PreviewCtl>>, path: &Path, start_iso: &str) {
+    let media = MediaFile::for_filename(path);
+    let clip_start = parse_iso(start_iso);
+    let is_audio = is_likely_audio(path);
+    {
+        let mut p = ctl.borrow_mut();
+        if let Some(id) = p.poll_source.take() {
+            id.remove();
+        }
+        p.video.set_media_stream(Some(&media));
+        p.placeholder.set_visible(false);
+        p.audio_badge.set_visible(is_audio);
+        if is_audio {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Audio");
+            p.audio_badge.set_text(&format!("🔊  {name}"));
+        }
+        p.clip_start = clip_start;
+        p.media = Some(media.clone());
+        media.play();
+    }
+
+    // Match macOS: poll playhead ~30fps while playing. Never seek from these updates.
+    let ctl_poll = ctl.clone();
+    let source = glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
+        let p = ctl_poll.borrow();
+        if p.user_scrubbing {
+            return glib::ControlFlow::Continue;
+        }
+        let Some(media) = p.media.as_ref() else {
+            return glib::ControlFlow::Continue;
+        };
+        // When paused/finished, leave scrubber where the user put it.
+        if !media.is_playing() {
+            return glib::ControlFlow::Continue;
+        }
+        let Some(start) = p.clip_start else {
+            return glib::ControlFlow::Continue;
+        };
+        let Some(progress_rc) = p.scrub_progress.clone() else {
+            return glib::ControlFlow::Continue;
+        };
+        let Some(wall_rc) = p.scrub_wall.clone() else {
+            return glib::ControlFlow::Continue;
+        };
+        let Some(update_ui) = p.update_ui.clone() else {
+            return glib::ControlFlow::Continue;
+        };
+        let domain_start = p.domain_start;
+        let domain_end = p.domain_end;
+        let us = media.timestamp();
+        let wall = start + chrono::Duration::microseconds(us);
+        let dur_us = media.duration();
+        let progress = match (domain_start, domain_end) {
+            (Some(ds), Some(de)) => {
+                let span = (de - ds).num_milliseconds() as f64 / 1000.0;
+                if span > 1e-9 {
+                    let p = (wall - ds).num_milliseconds() as f64 / 1000.0 / span;
+                    if (-0.02..=1.02).contains(&p) {
+                        p.clamp(0.0, 1.0)
+                    } else if dur_us > 0 {
+                        (us as f64 / dur_us as f64).clamp(0.0, 1.0)
+                    } else {
+                        return glib::ControlFlow::Continue;
+                    }
+                } else if dur_us > 0 {
+                    (us as f64 / dur_us as f64).clamp(0.0, 1.0)
+                } else {
+                    return glib::ControlFlow::Continue;
+                }
+            }
+            _ if dur_us > 0 => (us as f64 / dur_us as f64).clamp(0.0, 1.0),
+            _ => return glib::ControlFlow::Continue,
+        };
+        drop(p);
+        *wall_rc.borrow_mut() = Some(wall);
+        {
+            let mut cur = progress_rc.borrow_mut();
+            if (*cur - progress).abs() < 0.0005 {
+                // Still refresh wall-based readout.
+            } else {
+                *cur = progress;
+            }
+        }
+        update_ui();
+        glib::ControlFlow::Continue
+    });
+    ctl.borrow_mut().poll_source = Some(source);
+}
+
+/// Seek only while user drags AND preview is playing. Paused/finished = decoupled.
+fn seek_preview_to_wall(ctl: &Rc<RefCell<PreviewCtl>>, wall: DateTime<FixedOffset>) {
+    let p = ctl.borrow();
+    if !p.user_scrubbing {
+        return;
+    }
+    let Some(media) = p.media.as_ref() else {
+        return;
+    };
+    if !media.is_playing() {
+        return;
+    }
+    let Some(start) = p.clip_start else {
+        return;
+    };
+    let offset = wall - start;
+    let us = offset.num_microseconds().unwrap_or(0);
+    if us < 0 {
+        return;
+    }
+    let cur = media.timestamp();
+    if (cur - us).abs() < 200_000 {
+        return;
+    }
+    media.seek(us);
 }
 
 fn margin(widget: &impl WidgetExt, px: i32) {
@@ -634,6 +803,7 @@ fn build_media_source_card(
     is_video: bool,
     state: &Rc<RefCell<State>>,
     refresh: &Rc<dyn Fn()>,
+    preview: &Rc<RefCell<PreviewCtl>>,
 ) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 4);
     let title = Label::new(Some(&group.label));
@@ -648,6 +818,35 @@ fn build_media_source_card(
     for clip in &group.clips {
         let row = GtkBox::new(Orientation::Vertical, 2);
         let name_row = GtkBox::new(Orientation::Horizontal, 6);
+        let thumb_target: gtk::Widget = if is_video {
+            if let Some(pix) = load_video_thumbnail(&clip.path) {
+                let pic = Picture::for_pixbuf(&pix);
+                pic.set_size_request(96, 54);
+                pic.set_can_shrink(true);
+                pic.upcast()
+            } else {
+                let fallback = Label::new(Some("🎬"));
+                fallback.set_size_request(96, 54);
+                fallback.upcast()
+            }
+        } else {
+            let icon = Label::new(Some("🔊"));
+            icon.set_size_request(96, 54);
+            icon.upcast()
+        };
+        let gesture = GestureClick::new();
+        gesture.set_button(1);
+        let path_p = clip.path.clone();
+        let start_p = clip.start.clone();
+        let preview_p = preview.clone();
+        gesture.connect_pressed(move |_g, n_press, _x, _y| {
+            if n_press == 2 {
+                open_preview(&preview_p, &path_p, &start_p);
+            }
+        });
+        thumb_target.add_controller(gesture);
+        thumb_target.set_tooltip_text(Some("Double-click to preview"));
+        name_row.append(&thumb_target);
         let name = clip
             .path
             .file_name()
@@ -733,6 +932,300 @@ fn build_media_source_card(
         card.append(&row);
     }
     card
+}
+
+
+fn load_video_thumbnail(path: &Path) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+    let tmp = std::env::temp_dir().join(format!(
+        "fitvid-thumb-{:x}.jpg",
+        path.to_string_lossy().bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64))
+    ));
+    let status = Command::new(fitvid_bin())
+        .args([
+            "thumbnail",
+            &path.to_string_lossy(),
+            "--out",
+            &tmp.to_string_lossy(),
+            "--width",
+            "192",
+        ])
+        .status();
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        return None;
+    }
+    gtk::gdk_pixbuf::Pixbuf::from_file(&tmp).ok()
+}
+
+fn load_series_json(fit: &Path, unit_system: &str) -> String {
+    let out = Command::new(fitvid_bin())
+        .args([
+            "series",
+            &fit.to_string_lossy(),
+            "--unit-system",
+            unit_system,
+            "--max-points",
+            "400",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => String::new(),
+    }
+}
+
+fn append_series_charts(
+    host: &GtkBox,
+    series_json: &str,
+    selected: &[String],
+    preview: &Rc<RefCell<PreviewCtl>>,
+) {
+    while let Some(c) = host.first_child() {
+        host.remove(&c);
+    }
+    {
+        let mut p = preview.borrow_mut();
+        p.scrub_progress = None;
+        p.scrub_wall = None;
+        p.update_ui = None;
+        p.domain_start = None;
+        p.domain_end = None;
+    }
+    if series_json.is_empty() {
+        host.append(&Label::new(Some("Load a FIT file to see charts.")));
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(series_json) else {
+        host.append(&Label::new(Some("Could not parse series.")));
+        return;
+    };
+    let Some(fields) = v.get("fields").and_then(|f| f.as_array()) else {
+        return;
+    };
+
+    #[derive(Clone)]
+    struct SeriesDraw {
+        label: String,
+        unit: String,
+        vals: Vec<f64>,
+        times: Vec<String>,
+        color: (f64, f64, f64),
+    }
+
+    let palette: [(f64, f64, f64); 8] = [
+        (1.0, 0.55, 0.0),
+        (0.0, 0.75, 0.85),
+        (0.2, 0.8, 0.3),
+        (1.0, 0.4, 0.7),
+        (0.95, 0.8, 0.1),
+        (0.6, 0.4, 0.9),
+        (0.2, 0.45, 0.95),
+        (0.95, 0.3, 0.25),
+    ];
+
+    let mut series: Vec<SeriesDraw> = Vec::new();
+    for field in fields {
+        let name = field.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        if selected.is_empty() || !selected.iter().any(|s| s == name) {
+            continue;
+        }
+        let label = field
+            .get("label")
+            .and_then(|x| x.as_str())
+            .unwrap_or(name)
+            .to_string();
+        let unit = field
+            .get("unit")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let points = field
+            .get("points")
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let vals: Vec<f64> = points
+            .iter()
+            .filter_map(|p| p.get("v").and_then(|v| v.as_f64()))
+            .collect();
+        let times: Vec<String> = points
+            .iter()
+            .filter_map(|p| p.get("t").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            .collect();
+        if vals.len() < 2 {
+            continue;
+        }
+        let color = palette[series.len() % palette.len()];
+        series.push(SeriesDraw {
+            label,
+            unit,
+            vals,
+            times,
+            color,
+        });
+    }
+
+    if series.is_empty() {
+        host.append(&Label::new(Some("Select telemetry fields to plot.")));
+        return;
+    }
+
+    let times_for_sync = series
+        .first()
+        .map(|s| s.times.clone())
+        .unwrap_or_default();
+    let mut domain_start: Option<DateTime<FixedOffset>> = None;
+    let mut domain_end: Option<DateTime<FixedOffset>> = None;
+    for t in &times_for_sync {
+        if let Some(pt) = parse_iso(t) {
+            domain_start = Some(domain_start.map_or(pt, |a| a.min(pt)));
+            domain_end = Some(domain_end.map_or(pt, |a| a.max(pt)));
+        }
+    }
+
+    let scrub_progress = Rc::new(RefCell::new(0.0f64));
+    let scrub_wall = Rc::new(RefCell::new(None::<DateTime<FixedOffset>>));
+    let series_rc = Rc::new(series);
+
+    let drawing = gtk::DrawingArea::new();
+    drawing.set_content_height(200);
+    drawing.set_hexpand(true);
+    let series_d = series_rc.clone();
+    let scrub_d = scrub_progress.clone();
+    drawing.set_draw_func(move |_area, cr, width, height| {
+        let w = width as f64;
+        let h = height as f64;
+        let progress = *scrub_d.borrow();
+        for s in series_d.iter() {
+            let min = s.vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = s.vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let span = (max - min).max(1e-9);
+            cr.set_source_rgb(s.color.0, s.color.1, s.color.2);
+            cr.set_line_width(1.75);
+            for (i, v) in s.vals.iter().enumerate() {
+                let x = i as f64 / (s.vals.len() - 1) as f64 * w;
+                let y = h - ((v - min) / span) * (h - 8.0) - 4.0;
+                if i == 0 {
+                    cr.move_to(x, y);
+                } else {
+                    cr.line_to(x, y);
+                }
+            }
+            let _ = cr.stroke();
+        }
+        let scrub_x = progress.clamp(0.0, 1.0) * w;
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.7);
+        cr.set_line_width(1.5);
+        cr.set_dash(&[4.0, 3.0], 0.0);
+        cr.move_to(scrub_x, 0.0);
+        cr.line_to(scrub_x, h);
+        let _ = cr.stroke();
+        cr.set_dash(&[], 0.0);
+    });
+    host.append(&drawing);
+
+    let readout = Label::new(None);
+    readout.set_halign(Align::Start);
+    readout.set_wrap(true);
+    readout.add_css_class("dim-label");
+
+    let domain_start_r = domain_start;
+    let domain_end_r = domain_end;
+    let update_readout = {
+        let series_r = series_rc.clone();
+        let scrub_r = scrub_progress.clone();
+        let wall_r = scrub_wall.clone();
+        let readout = readout.clone();
+        let drawing = drawing.clone();
+        Rc::new(move || {
+            let progress = *scrub_r.borrow();
+            let mut parts: Vec<String> = Vec::new();
+            let wall = wall_r.borrow().or_else(|| match (domain_start_r, domain_end_r) {
+                (Some(a), Some(b)) => {
+                    let span = (b - a).num_milliseconds() as f64 / 1000.0;
+                    Some(a + chrono::Duration::milliseconds((progress.clamp(0.0, 1.0) * span * 1000.0) as i64))
+                }
+                _ => None,
+            });
+            if let Some(w) = wall {
+                parts.push(format_iso(w));
+            }
+            for s in series_r.iter() {
+                let idx = if let Some(w) = wall {
+                    s.times
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, t)| parse_iso(t).map(|pt| (i, (pt - w).num_milliseconds().abs())))
+                        .min_by_key(|(_, d)| *d)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let i = idx.min(s.vals.len().saturating_sub(1));
+                let unit = if s.unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", s.unit)
+                };
+                parts.push(format!("{}: {:.4}{}", s.label, s.vals[i], unit));
+            }
+            readout.set_text(&parts.join("   ·   "));
+            drawing.queue_draw();
+        }) as Rc<dyn Fn()>
+    };
+    update_readout();
+
+    {
+        let mut p = preview.borrow_mut();
+        p.scrub_progress = Some(scrub_progress.clone());
+        p.scrub_wall = Some(scrub_wall.clone());
+        p.update_ui = Some(update_readout.clone());
+        p.domain_start = domain_start;
+        p.domain_end = domain_end;
+    }
+
+    let drag = GestureDrag::new();
+    drag.set_button(1);
+    let preview_d = preview.clone();
+    let scrub_p = scrub_progress.clone();
+    let scrub_w = scrub_wall.clone();
+    let update_d = update_readout.clone();
+    let drawing_d = drawing.clone();
+    drag.connect_drag_begin(move |_,_,_| {
+        preview_d.borrow_mut().user_scrubbing = true;
+    });
+    let preview_u = preview.clone();
+    let domain_s = domain_start;
+    let domain_e = domain_end;
+    drag.connect_drag_update(move |g, _, _| {
+        let Some((x, _)) = g.offset() else { return };
+        // offset is relative to begin; use start + offset
+        let Some((x0, _)) = g.start_point() else { return };
+        let width = drawing_d.width() as f64;
+        if width <= 1.0 {
+            return;
+        }
+        let progress = ((x0 + x) / width).clamp(0.0, 1.0);
+        *scrub_p.borrow_mut() = progress;
+        if let (Some(a), Some(b)) = (domain_s, domain_e) {
+            let span = (b - a).num_milliseconds() as f64 / 1000.0;
+            let wall =
+                a + chrono::Duration::milliseconds((progress * span * 1000.0) as i64);
+            *scrub_w.borrow_mut() = Some(wall);
+            seek_preview_to_wall(&preview_u, wall);
+        }
+        update_d();
+    });
+    let preview_e = preview.clone();
+    drag.connect_drag_end(move |_, _, _| {
+        preview_e.borrow_mut().user_scrubbing = false;
+    });
+    drawing.add_controller(drag);
+
+    host.append(&Label::new(Some(
+        "Drag on the chart to scrub; playback drives the line while playing.",
+    )));
+    host.append(&readout);
 }
 
 fn collect_files(list: &gtk::gio::ListModel) -> Vec<PathBuf> {
@@ -842,6 +1335,60 @@ fn build_ui(app: &Application) {
     work.append(&Label::new(Some("Highlights")));
     work.append(&mode);
     work.append(&run_row);
+    let preview_heading = Label::new(Some("Preview / FIT telemetry"));
+    preview_heading.set_margin_top(28);
+    preview_heading.set_margin_bottom(8);
+    work.append(&preview_heading);
+
+    let preview_charts = Paned::new(Orientation::Horizontal);
+    preview_charts.set_vexpand(true);
+    preview_charts.set_wide_handle(true);
+
+    let preview_box = GtkBox::new(Orientation::Vertical, 4);
+    preview_box.set_hexpand(true);
+    preview_box.set_size_request(280, 220);
+    let preview_video = Video::new();
+    preview_video.set_hexpand(true);
+    preview_video.set_vexpand(true);
+    preview_video.set_size_request(280, 180);
+    let preview_placeholder = Label::new(Some(
+        "Double-click a video or audio clip to preview",
+    ));
+    preview_placeholder.set_wrap(true);
+    preview_placeholder.add_css_class("dim-label");
+    let audio_badge = Label::new(None);
+    audio_badge.set_visible(false);
+    audio_badge.set_wrap(true);
+    let preview_overlay = gtk::Overlay::new();
+    preview_overlay.set_child(Some(&preview_video));
+    preview_overlay.add_overlay(&preview_placeholder);
+    preview_overlay.add_overlay(&audio_badge);
+    preview_placeholder.set_halign(Align::Center);
+    preview_placeholder.set_valign(Align::Center);
+    audio_badge.set_halign(Align::Center);
+    audio_badge.set_valign(Align::Center);
+    preview_box.append(&preview_overlay);
+
+    let charts_scroll = ScrolledWindow::new();
+    charts_scroll.set_min_content_height(200);
+    charts_scroll.set_vexpand(true);
+    charts_scroll.set_hexpand(true);
+    let charts_host = GtkBox::new(Orientation::Vertical, 6);
+    charts_scroll.set_child(Some(&charts_host));
+
+    preview_charts.set_start_child(Some(&preview_box));
+    preview_charts.set_end_child(Some(&charts_scroll));
+    preview_charts.set_resize_start_child(true);
+    preview_charts.set_resize_end_child(true);
+    preview_charts.set_position(360);
+    work.append(&preview_charts);
+
+    let preview_ctl = Rc::new(RefCell::new(PreviewCtl::new(
+        preview_video,
+        preview_placeholder,
+        audio_badge,
+    )));
+
     work.append(&Label::new(Some("Log")));
     work.append(&log_scroll);
     paned.set_start_child(Some(&field_scroll));
@@ -908,6 +1455,7 @@ fn build_ui(app: &Application) {
         let fit_host = fit_host.clone();
         let state = state.clone();
         let refresh_dock_slot = refresh_dock_slot.clone();
+        let preview = preview_ctl.clone();
         Rc::new(move || {
             while let Some(c) = video_host.first_child() {
                 video_host.remove(&c);
@@ -940,6 +1488,7 @@ fn build_ui(app: &Application) {
                         true,
                         &state,
                         &call_refresh,
+                        &preview,
                     ));
                 }
             }
@@ -954,6 +1503,7 @@ fn build_ui(app: &Application) {
                         false,
                         &state,
                         &call_refresh,
+                        &preview,
                     ));
                 }
             }
@@ -981,6 +1531,8 @@ fn build_ui(app: &Application) {
         let field_box = field_box.clone();
         let state = state.clone();
         let rebuild_fields_slot = rebuild_fields_slot.clone();
+        let charts_host = charts_host.clone();
+        let preview = preview_ctl.clone();
         Rc::new(move || {
             while let Some(c) = field_box.first_child() {
                 field_box.remove(&c);
@@ -1001,7 +1553,10 @@ fn build_ui(app: &Application) {
                     if st.unit_system == next {
                         return;
                     }
-                    st.unit_system = next;
+                    st.unit_system = next.clone();
+                    if let Some(fit) = st.fit.clone() {
+                        st.series_json = load_series_json(&fit, &next);
+                    }
                 }
                 if let Some(f) = rebuild_slot.borrow().clone() {
                     f();
@@ -1040,6 +1595,28 @@ fn build_ui(app: &Application) {
                     field_box.append(&map);
                 }
             }
+            let st2 = state.borrow();
+            append_series_charts(&charts_host, &st2.series_json, &st2.selected, &preview);
+        })
+    };
+
+
+    let refresh_charts = {
+        let charts_host = charts_host.clone();
+        let state = state.clone();
+        let preview = preview_ctl.clone();
+        Rc::new(move || {
+            {
+                let mut st = state.borrow_mut();
+                if st.series_json.is_empty() {
+                    if let Some(fit) = st.fit.clone() {
+                        let unit = st.unit_system.clone();
+                        st.series_json = load_series_json(&fit, &unit);
+                    }
+                }
+            }
+            let st = state.borrow();
+            append_series_charts(&charts_host, &st.series_json, &st.selected, &preview);
         })
     };
 
@@ -1065,6 +1642,7 @@ fn build_ui(app: &Application) {
         let fit_ref_entry = fit_ref_entry.clone();
         let watch_entry = watch_entry.clone();
         let wall_entry = wall_entry.clone();
+        let refresh_charts = refresh_charts.clone();
         let wizard_btn_click = wizard_btn.clone();
         wizard_btn_click.connect_clicked(move |_| {
             let step = state.borrow().step;
@@ -1127,6 +1705,7 @@ fn build_ui(app: &Application) {
                                             st.watch_clock = st.fit_reference.clone();
                                             st.wall_clock.clear();
                                             st.fit = Some(path.clone());
+                                            st.series_json.clear();
                                             st.inspect = Some(payload);
                                             st.step = WizardStep::SyncFit;
                                         }
@@ -1298,6 +1877,7 @@ fn build_ui(app: &Application) {
                     main.set_visible(true);
                     rebuild_fields();
                     refresh_dock();
+                    refresh_charts();
                 }
                 WizardStep::Ready => {}
             }
@@ -1311,6 +1891,7 @@ fn build_ui(app: &Application) {
         let refresh_dock = refresh_dock.clone();
         let rebuild_fields = rebuild_fields.clone();
         let device_sync_box = device_sync_box.clone();
+        let refresh_charts = refresh_charts.clone();
         skip_btn.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             st.audio_groups.clear();
@@ -1321,6 +1902,7 @@ fn build_ui(app: &Application) {
             main.set_visible(true);
             rebuild_fields();
             refresh_dock();
+            refresh_charts();
         });
     }
 
