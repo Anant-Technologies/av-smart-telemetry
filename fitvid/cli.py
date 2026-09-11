@@ -292,6 +292,56 @@ def probe_media_cmd(
         )
 
 
+@app.command("thumbnail")
+def thumbnail_cmd(
+    video: Path = typer.Argument(..., exists=True, help="Video file"),
+    out: Path = typer.Option(..., "--out", "-o", help="Output image path (.jpg/.png)"),
+    time_s: Optional[float] = typer.Option(
+        None, "--time", "-t", help="Timestamp seconds (default ~10% into clip)"
+    ),
+    width: int = typer.Option(320, "--width", "-w", help="Thumbnail width in pixels"),
+) -> None:
+    """Extract a single-frame thumbnail for native UI media docks."""
+    from fitvid.thumbnail import extract_thumbnail
+
+    path = extract_thumbnail(video, out, time_s=time_s, width=width)
+    print(json.dumps({"path": str(path.resolve()), "width": width}))
+
+
+@app.command("series")
+def series_cmd(
+    fit: Path = typer.Argument(..., exists=True, help="Activity .fit file"),
+    fields: Optional[str] = typer.Option(
+        None,
+        "--fields",
+        help="Comma-separated field names (default: all numeric except lat/lon)",
+    ),
+    max_points: int = typer.Option(800, "--max-points", help="Downsample cap"),
+    unit_system: str = typer.Option(
+        "fps", "--unit-system", help="fps | metric (values converted for charts)"
+    ),
+    session: int = typer.Option(0, "--session"),
+) -> None:
+    """Export downsampled telemetry series JSON for UI charts."""
+    from fitvid.series import export_series
+
+    activities = parse_fit(fit)
+    if not activities:
+        print(json.dumps({"error": "No activities found in FIT file"}))
+        raise typer.Exit(1)
+    if session >= len(activities):
+        print(json.dumps({"error": f"Session {session} out of range"}))
+        raise typer.Exit(1)
+    field_list = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
+    payload = export_series(
+        activities[session],
+        fields=field_list,
+        max_points=max_points,
+        unit_system=unit_system,
+    )
+    print(json.dumps(payload, indent=2, default=str))
+
+
 def main() -> None:
     app()
 

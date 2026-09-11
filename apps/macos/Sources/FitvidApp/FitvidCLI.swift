@@ -118,6 +118,23 @@ final class FitvidCLI {
         return devices
     }
 
+    func series(fit: URL, unitSystem: String = "fps") throws -> SeriesPayload {
+        let result = try run(arguments: [
+            "series", fit.path,
+            "--unit-system", unitSystem,
+            "--max-points", "600",
+        ])
+        guard result.exitCode == 0 else {
+            throw FitvidCLIError.failed(result.stderr.isEmpty ? result.stdout : result.stderr)
+        }
+        let data = Data(result.stdout.utf8)
+        do {
+            return try JSONDecoder().decode(SeriesPayload.self, from: data)
+        } catch {
+            throw FitvidCLIError.badJSON(error.localizedDescription + "\n" + result.stdout)
+        }
+    }
+
     func compile(
         fit: URL,
         videos: [MediaClipItem],

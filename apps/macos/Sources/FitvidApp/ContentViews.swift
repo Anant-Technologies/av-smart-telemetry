@@ -305,6 +305,18 @@ struct WorkAreaView: View {
                     .disabled(model.isBusy)
                 if model.isBusy { ProgressView().controlSize(.small) }
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.bottom, 28)
+
+            HSplitView {
+                MediaPreviewPane()
+                    .frame(minWidth: 220, idealWidth: 360)
+                FitTelemetryGraphsView()
+                    .frame(minWidth: 280)
+            }
+            .frame(minHeight: 240)
+            .padding(.top, 16)
+            .layoutPriority(1)
 
             Text("Log").font(.headline)
             ScrollView {
@@ -313,10 +325,17 @@ struct WorkAreaView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
             }
+            .frame(minHeight: 80, maxHeight: 140)
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .padding()
+        .onChange(of: model.unitSystem) { _, _ in
+            model.reloadSeries()
+        }
+        .onChange(of: model.selectedFieldNames) { _, _ in
+            // Charts filter client-side; no reload needed
+        }
     }
 }
 
@@ -436,17 +455,35 @@ struct SourceGroupCard: View {
 }
 
 struct MediaClipRow: View {
+    @EnvironmentObject var model: AppModel
     @Binding var clip: MediaClipItem
     let systemImage: String
     let onRemove: () -> Void
 
+    private var isVideo: Bool { systemImage == "film" || systemImage == "video" }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.title3)
-                .frame(width: 28, height: 28)
-                .background(Color.accentColor.opacity(0.15))
-                .clipShape(RoundedRectangle(cornerRadius: 5))
+            if isVideo {
+                VideoThumbnailView(url: clip.url)
+                    .onTapGesture(count: 2) {
+                        model.openPreview(clip: clip, isAudio: false)
+                    }
+                    .onTapGesture {
+                        NSWorkspace.shared.activateFileViewerSelecting([clip.url])
+                    }
+                    .help("Double-click to preview")
+            } else {
+                Image(systemName: systemImage)
+                    .font(.title3)
+                    .frame(width: 96, height: 54)
+                    .background(Color.accentColor.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .onTapGesture(count: 2) {
+                        model.openPreview(clip: clip, isAudio: true)
+                    }
+                    .help("Double-click to preview audio")
+            }
             VStack(alignment: .leading, spacing: 4) {
                 Text(clip.url.lastPathComponent)
                     .font(.caption)

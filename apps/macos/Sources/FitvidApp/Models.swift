@@ -70,6 +70,41 @@ struct LapTime: Codable, Hashable {
     }
 }
 
+// MARK: - FIT series (charts)
+
+struct SeriesPoint: Identifiable, Codable, Hashable {
+    var id: String { t }
+    let t: String
+    let v: Double
+
+    var date: Date {
+        LocalTimeSync.parse(t) ?? Date()
+    }
+}
+
+struct SeriesField: Identifiable, Codable, Hashable {
+    var id: String { name }
+    let name: String
+    let label: String
+    let unit: String
+    let points: [SeriesPoint]
+}
+
+struct SeriesPayload: Codable {
+    let sessionStart: String?
+    let sessionEnd: String?
+    let unitSystem: String?
+    let fields: [SeriesField]
+    let laps: [LapTime]?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionStart = "session_start"
+        case sessionEnd = "session_end"
+        case unitSystem = "unit_system"
+        case fields, laps
+    }
+}
+
 struct InspectPayload: Codable {
     let sport: String
     let sessionIndex: Int?
@@ -120,6 +155,14 @@ struct MediaClipItem: Identifiable, Hashable {
         self.startISO = startISO ?? metadataStartISO
         self.duration = duration
     }
+}
+
+/// Clip shown in the work-area preview player (left of FIT scrubber).
+struct PreviewMedia: Equatable, Identifiable {
+    var id: URL { url }
+    let url: URL
+    let startISO: String
+    let isAudio: Bool
 }
 
 struct MediaDeviceGroup: Identifiable, Hashable {

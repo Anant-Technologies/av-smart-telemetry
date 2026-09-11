@@ -42,8 +42,90 @@ final class AppModel: ObservableObject {
     @Published var wallClockISO = ""
     @Published var cameraGroups: [MediaDeviceGroup] = []
     @Published var audioGroups: [MediaDeviceGroup] = []
+    @Published var seriesFields: [SeriesField] = []
+    @Published var isLoadingSeries = false
+
+    /// Shared FIT scrubber wall-clock time (for value readout).
+    @Published var scrubDate: Date?
+    /// 0…1 position of the scrubber line across the chart (always moves with preview).
+    @Published var scrubProgress: Double = 0
+    /// Media open in the left-hand preview pane (double-click from dock).
+    @Published var previewMedia: PreviewMedia?
+    /// When true, scrubDate updates come from the player — don't seek back into it.
+    var scrubDrivenByPlayer = false
+    /// User is dragging the chart scrubber — ignore playback polls until release.
+    var userIsScrubbing = false
 
     private let cli = FitvidCLI()
+
+    func openPreview(clip: MediaClipItem, isAudio: Bool) {
+        previewMedia = PreviewMedia(
+            url: clip.url,
+            startISO: clip.startISO,
+            isAudio: isAudio
+        )
+        if let start = LocalTimeSync.parse(clip.startISO) {
+            scrubDrivenByPlayer = true
+            scrubDate = start
+            scrubProgress = 0
+            scrubDrivenByPlayer = false
+        }
+    }
+
+    func clearPreview() {
+        previewMedia = nil
+    }
+
+    /// Called while preview is playing. `videoSeconds` / `videoDuration` keep the
+    /// scrubber line moving even when wall-clock is outside the FIT domain.
+    func updateScrubFromPlayer(wall: Date, videoSeconds: Double, videoDuration: Double) {
+        // Playback owns the playhead — never seek from these updates.
+        guard !userIsScrubbing else { return }
+        scrubDrivenByPlayer = true
+        scrubDate = wall
+
+        let fitStart = seriesFields.flatMap(\.points).map(\.date).min()
+        let fitEnd = seriesFields.flatMap(\.points).map(\.date).max()
+        if let fitStart, let fitEnd {
+            let span = fitEnd.timeIntervalSince(fitStart)
+            if span > 1e-6 {
+                let p = wall.timeIntervalSince(fitStart) / span
+                if p >= -0.02 && p <= 1.02 {
+                    scrubProgress = min(1, max(0, p))
+                } else if videoDuration > 1e-6 {
+                    scrubProgress = min(1, max(0, videoSeconds / videoDuration))
+                }
+            } else if videoDuration > 1e-6 {
+                scrubProgress = min(1, max(0, videoSeconds / videoDuration))
+            }
+        } else if videoDuration > 1e-6 {
+            scrubProgress = min(1, max(0, videoSeconds / videoDuration))
+        }
+        // Keep flag true until after SwiftUI processes this publish, then clear.
+        DispatchQueue.main.async { [weak self] in
+            self?.scrubDrivenByPlayer = false
+        }
+    }
+
+    /// User dragged the scrubber on the chart (0…1 across FIT domain).
+    func userScrub(toProgress p: Double) {
+        let clamped = min(1, max(0, p))
+        userIsScrubbing = true
+        scrubDrivenByPlayer = false
+        scrubProgress = clamped
+        let fitStart = seriesFields.flatMap(\.points).map(\.date).min()
+        let fitEnd = seriesFields.flatMap(\.points).map(\.date).max()
+        if let fitStart, let fitEnd {
+            let span = fitEnd.timeIntervalSince(fitStart)
+            if span > 1e-6 {
+                scrubDate = fitStart.addingTimeInterval(clamped * span)
+            }
+        }
+    }
+
+    func endUserScrub() {
+        userIsScrubbing = false
+    }
 
     var videoClips: [MediaClipItem] { cameraGroups.flatMap(\.files) }
     var audioClips: [MediaClipItem] { audioGroups.flatMap(\.files) }
@@ -99,11 +181,33 @@ final class AppModel: ObservableObject {
                 wallClockISO = ""
                 wizard = .syncFit
                 appendLog("Inspected \(url.lastPathComponent): \(payload.fields.count) fields (times in local TZ)")
+                reloadSeries()
             } catch {
                 errorMessage = error.localizedDescription
                 appendLog("Inspect failed: \(error.localizedDescription)")
             }
             isBusy = false
+        }
+    }
+
+    func reloadSeries() {
+        guard let fitURL else {
+            seriesFields = []
+            return
+        }
+        isLoadingSeries = true
+        let system = unitSystem.yamlValue
+        Task {
+            do {
+                let payload = try await Task.detached { [cli] in
+                    try cli.series(fit: fitURL, unitSystem: system)
+                }.value
+                seriesFields = payload.fields
+            } catch {
+                appendLog("Series load failed: \(error.localizedDescription)")
+                seriesFields = []
+            }
+            isLoadingSeries = false
         }
     }
 
