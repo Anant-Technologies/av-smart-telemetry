@@ -1,0 +1,19 @@
+# Example overlay config for fitvid compile --overlay
+overlay:
+  text:
+    - field: speed
+      format: "{value:.1f} km/h"
+      anchor: bottom-left
+      # note: speed in FIT is typically m/s — adjust format/unit_system as needed
+      unit_system: metric
+    - field: heart_rate
+      label: "HR"
+      format: "{value:.0f} bpm"
+      anchor: bottom-right
+      color: "#FF5A36"
+  map:
+    style: route-only
+    anchor: top-right
+    width_px: 300
+    height_px: 300
+  allow_overlap: false

@@ -1,0 +1,17 @@
+# Example select configs for `fitvid compile --select select.yaml`
+
+# Default UI mode: concatenate every video ordered by creation_time.
+# FIT overlay still burns where absolute timestamps overlap the activity.
+select:
+  - type: videos
+
+# Alternatives:
+# select:
+#   - type: laps
+#
+# select:
+#   - type: threshold
+#     field: power
+#     op: ">"
+#     value: 300
+#     min_duration: 5

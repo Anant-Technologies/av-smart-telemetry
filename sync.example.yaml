@@ -1,0 +1,27 @@
+# Example device clock sync config for `fitvid compile --sync-config sync.yaml`
+#
+# Offsets:
+#   fit_offset = wall_clock - watch_clock  (or 0 if wall_clock is null and watch matches reference)
+#   media_offset = spine_time - device_clock
+#   spine_time = wall_clock if set, else fit_reference (+ fit_offset)
+
+sync:
+  fit_generator:
+    label: "Garmin Edge 840"
+    fit_reference: "2026-09-05T20:38:35+00:00"
+    watch_clock: "2026-09-05T20:38:35+00:00"
+    wall_clock: null
+  devices:
+    - id: gopro-hero11
+      kind: video
+      label: "GoPro Hero 11"
+      device_clock: "2026-09-05T13:38:40-07:00"
+      files:
+        - /path/to/a.mp4
+        - /path/to/b.mp4
+    - id: zoom-h5
+      kind: audio
+      label: "Zoom H5"
+      device_clock: "2026-09-05T13:38:42-07:00"
+      files:
+        - /path/to/track.wav

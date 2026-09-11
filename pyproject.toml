@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fitvid"
+version = "0.1.0"
+description = "FIT-driven video compiler: select and stitch activity video from telemetry"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "fitvid" }]
+dependencies = [
+    "fitdecode>=0.10.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "Pillow>=10.0",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+fitvid = "fitvid.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["fitvid*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
